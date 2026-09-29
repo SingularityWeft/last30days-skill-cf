@@ -27,6 +27,8 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
+from lib import http
+
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -86,15 +88,12 @@ def _fetch_json(url: str, timeout: int = 15) -> Optional[Dict[str, Any]]:
 
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                delay = BASE_BACKOFF * (2 ** attempt)
-                retry_after = None
-                if hasattr(e, "headers"):
-                    retry_after = e.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        delay = float(retry_after)
-                    except ValueError:
-                        pass
+                # Reddit answers an anonymous 429 with x-ratelimit-reset and no
+                # Retry-After; honour either. See http.retry_delay_from_headers.
+                delay = http.retry_delay_from_headers(
+                    getattr(e, "headers", None),
+                    BASE_BACKOFF * (2 ** attempt),
+                )
                 _log(f"429 rate limited, retry {attempt + 1}/{MAX_RETRIES} after {delay:.1f}s")
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(delay)
@@ -242,18 +241,20 @@ def search_reddit_public(
     to_date: str,
     depth: str = "default",
     subreddits: Optional[List[str]] = None,
+    dedicated_subreddits: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """High-level free Reddit search + enrichment (keyless).
 
-    Thin compatibility shim over the tiered keyless pipeline: the legacy
-    ``.json`` search/enrichment endpoints now return HTTP 403, so this delegates
-    to ``reddit_keyless.search_and_enrich`` (Tier 0 one-shot ``.json`` →
-    Tier 1 RSS discovery → Tier 2 shreddit comment enrichment). The name and
-    signature are preserved so ``pipeline.py`` and other callers need no change
-    and the ScrapeCreators backup still engages when this returns empty.
+    Thin compatibility shim over the keyless pipeline: the legacy ``.json``
+    search/enrichment endpoints now return HTTP 403, so this delegates to
+    ``reddit_keyless.search_and_enrich`` (dedicated-sub listings + RSS discovery
+    → shreddit comment enrichment; no ``.json`` search). The name and signature
+    are preserved so ``pipeline.py`` and other callers need no change and the
+    ScrapeCreators backup still engages when this returns empty.
 
-    The module-level ``search`` / ``_parse_posts`` helpers remain in use as the
-    keyless pipeline's demoted Tier 0 ``.json`` attempt.
+    The module-level ``search`` / ``_parse_posts`` helpers remain as a
+    standalone ``.json`` search utility (own test coverage), no longer wired
+    into the keyless production path.
 
     Args:
         topic: Search topic
@@ -268,5 +269,6 @@ def search_reddit_public(
     """
     from . import reddit_keyless
     return reddit_keyless.search_and_enrich(
-        topic, from_date, to_date, depth=depth, subreddits=subreddits
+        topic, from_date, to_date, depth=depth, subreddits=subreddits,
+        dedicated_subreddits=dedicated_subreddits,
     )
